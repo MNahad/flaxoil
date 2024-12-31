@@ -1,3 +1,3 @@
-from .wirings import AutoNCP, NCP
+from .wirings import WiringParams
 
-__all__ = ["AutoNCP", "NCP"]
+__all__ = ["WiringParams"]

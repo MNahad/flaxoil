@@ -16,329 +16,345 @@
 # Copyright 2024 Mohammed Nawabuddin
 # SPDX-License-Identifier: Apache-2.0
 
-import jax
-from jax import numpy as jnp
+from dataclasses import dataclass, field
+from typing import Callable, Optional, Protocol
 
-from .random import PRNG
-
-
-class Wiring:
-    def __init__(self, units: int) -> None:
-        self._units = units
-        self._adjacency_matrix = jnp.zeros([units, units], dtype=jnp.int32)
-        self._sensory_adjacency_matrix: jax.Array | None = None
-        self._input_dim: int | None = None
-        self._output_dim: int | None = None
-
-    @property
-    def input_dim(self) -> int:
-        return self._input_dim
-
-    @input_dim.setter
-    def input_dim(self, input_dim: int) -> None:
-        self._input_dim = input_dim
-        self._sensory_adjacency_matrix = jnp.zeros(
-            [self._input_dim, self._units], dtype=jnp.int32
-        )
-
-    @property
-    def output_dim(self) -> int:
-        return self._output_dim
-
-    @output_dim.setter
-    def output_dim(self, output_dim: int) -> None:
-        self._output_dim = output_dim
-
-    @property
-    def units(self) -> int:
-        return self._units
-
-    def build(self, input_shape: int) -> None:
-        raise NotImplementedError
-
-    def erev_initializer(self, *, dtype=jnp.int32) -> jax.Array:
-        return self._adjacency_matrix.astype(dtype)
-
-    def sensory_erev_initializer(self, *, dtype=jnp.int32) -> jax.Array:
-        return self._sensory_adjacency_matrix.astype(dtype)
-
-    def _is_input_dim_initialized(self, input_dim: int) -> bool:
-        if self.input_dim is not None and self.input_dim != input_dim:
-            raise ValueError(
-                "Conflicting input dimensions provided. set_input_dim() was called with {} but actual input has dimension {}".format(
-                    self.input_dim, input_dim
-                )
-            )
-        return self.input_dim is not None
-
-    def _add_synapse(self, src: int, dest: int, polarity: int) -> None:
-        if src < 0 or src >= self._units:
-            raise ValueError(
-                "Cannot add synapse originating in {} if cell has only {} units".format(
-                    src, self._units
-                )
-            )
-        if dest < 0 or dest >= self._units:
-            raise ValueError(
-                "Cannot add synapse feeding into {} if cell has only {} units".format(
-                    dest, self._units
-                )
-            )
-        if polarity not in [-1, 1]:
-            raise ValueError(
-                "Cannot add synapse with polarity {} (expected -1 or +1)".format(
-                    polarity
-                )
-            )
-        self._adjacency_matrix = self._adjacency_matrix.at[src, dest].set(
-            polarity
-        )
-
-    def _add_sensory_synapse(self, src: int, dest: int, polarity: int) -> None:
-        if self._input_dim is None:
-            raise ValueError(
-                "Cannot add sensory synapses before build() has been called!"
-            )
-        if src < 0 or src >= self._input_dim:
-            raise ValueError(
-                "Cannot add sensory synapse originating in {} if input has only {} features".format(
-                    src, self._input_dim
-                )
-            )
-        if dest < 0 or dest >= self._units:
-            raise ValueError(
-                "Cannot add synapse feeding into {} if cell has only {} units".format(
-                    dest, self._units
-                )
-            )
-        if polarity not in [-1, 1]:
-            raise ValueError(
-                "Cannot add synapse with polarity {} (expected -1 or +1)".format(
-                    polarity
-                )
-            )
-        self._sensory_adjacency_matrix = self._sensory_adjacency_matrix.at[
-            src, dest
-        ].set(polarity)
+from jax import Array, numpy as jnp, random
 
 
-class NCP(Wiring):
-    def __init__(
+type _WiringParams = dict[str, int]
+type WiringParams = dict[str, _WiringParams]
+
+
+class Wiring(Protocol):
+    units: int
+    input_dim: int
+    output_dim: int
+
+    def init_adjacency_matrix(self, key: Array) -> Array: ...
+
+    def init_sensory_adjacency_matrix(
         self,
-        inter_neurons: int,
-        command_neurons: int,
-        motor_neurons: int,
-        sensory_fanout: int,
-        inter_fanout: int,
-        recurrent_command_synapses: int,
-        motor_fanin: int,
-        seed=22222,
-    ) -> None:
-        """
-        Creates a Neural Circuit Policies wiring.
-        The total number of neurons (= state size of the RNN) is given by the sum of inter, command, and motor neurons.
-        For an easier way to generate a NCP wiring see the `AutoNCP` wiring class.
+        key: Array,
+        input_dim: int,
+    ) -> Array: ...
 
-        :param inter_neurons: The number of inter neurons (layer 2)
-        :param command_neurons: The number of command neurons (layer 3)
-        :param motor_neurons: The number of motor neurons (layer 4 = number of outputs)
-        :param sensory_fanout: The average number of outgoing synapses from the sensory to the inter neurons
-        :param inter_fanout: The average number of outgoing synapses from the inter to the command neurons
-        :param recurrent_command_synapses: The average number of recurrent connections in the command neuron layer
-        :param motor_fanin: The average number of incoming synapses of the motor neurons from the command neurons
-        :param seed: The random seed used to generate the wiring
-        """
-        super(NCP, self).__init__(
-            inter_neurons + command_neurons + motor_neurons
-        )
-        self.output_dim = motor_neurons
-        self._rng = PRNG(seed)
-        self._num_inter_neurons = inter_neurons
-        self._num_command_neurons = command_neurons
-        self._num_motor_neurons = motor_neurons
-        self._sensory_fanout = sensory_fanout
-        self._inter_fanout = inter_fanout
-        self._recurrent_command_synapses = recurrent_command_synapses
-        self._motor_fanin = motor_fanin
 
-        self._motor_neurons = list(range(0, self._num_motor_neurons))
-        self._command_neurons = list(
-            range(
-                self._num_motor_neurons,
-                self._num_motor_neurons + self._num_command_neurons,
-            )
-        )
-        self._inter_neurons = list(
-            range(
-                self._num_motor_neurons + self._num_command_neurons,
-                self._num_motor_neurons
-                + self._num_command_neurons
-                + self._num_inter_neurons,
-            )
-        )
+@dataclass
+class NCP:
+    """
+    Creates a Neural Circuit Policies wiring.
+    The total number of neurons (= state size of the RNN) is given by the sum of inter, command, and motor neurons.
+    For an easier way to generate a NCP wiring see the `AutoNCP` wiring class.
 
-        if self._motor_fanin > self._num_command_neurons:
-            raise ValueError(
-                "Error: Motor fanin parameter is {} but there are only {} command neurons".format(
-                    self._motor_fanin, self._num_command_neurons
+    :param inter_neurons: The number of inter neurons (layer 2)
+    :param command_neurons: The number of command neurons (layer 3)
+    :param motor_neurons: The number of motor neurons (layer 4 = number of outputs)
+    :param sensory_fanout: The average number of outgoing synapses from the sensory to the inter neurons
+    :param inter_fanout: The average number of outgoing synapses from the inter to the command neurons
+    :param recurrent_command_synapses: The average number of recurrent connections in the command neuron layer
+    :param motor_fanin: The average number of incoming synapses of the motor neurons from the command neurons
+    :param seed: The random seed used to generate the wiring
+    """
+
+    inter_neurons: int
+    command_neurons: int
+    motor_neurons: int
+    sensory_fanout: int
+    inter_fanout: int
+    recurrent_command_synapses: int
+    motor_fanin: int
+    units: int = field(init=False)
+    input_dim: int = field(init=False, default=0)
+    output_dim: int = field(init=False)
+
+    @staticmethod
+    def _apply_on_submatrix(
+        key: Array,
+        matrix: Array,
+        col_row_slices: tuple[tuple[int, int], tuple[int, int]],
+        transform: Callable[[Array], Array],
+        axis: int,
+        filter_zeroed_only: bool = False,
+    ) -> Array:
+        row_slice = col_row_slices[1]
+        col_slice = col_row_slices[0]
+        axis_length = col_row_slices[axis][1] - col_row_slices[axis][0]
+        keys = jnp.expand_dims(random.split(key, axis_length), axis)
+        sub_matrix = (
+            matrix[row_slice[0] : row_slice[1], col_slice[0] : col_slice[1]]
+            * filter_zeroed_only
+        )
+        matrix = matrix.at[
+            row_slice[0] : row_slice[1], col_slice[0] : col_slice[1]
+        ].set(
+            sub_matrix
+            + (
+                jnp.all(sub_matrix == 0, axis=axis, keepdims=True)
+                * jnp.apply_along_axis(
+                    lambda key_arr: transform(key_arr[0]),
+                    axis,
+                    keys,
                 )
             )
-        if self._sensory_fanout > self._num_inter_neurons:
-            raise ValueError(
-                "Error: Sensory fanout parameter is {} but there are only {} inter neurons".format(
-                    self._sensory_fanout, self._num_inter_neurons
-                )
+        )
+        return matrix
+
+    @staticmethod
+    def _clip(n: int, minimum: int, maximum: int) -> int:
+        return min(max(n, minimum), maximum)
+
+    @staticmethod
+    def _get_wires(key: Array, amount: int, total: int) -> Array:
+        wires = random.choice(
+            key,
+            jnp.array([-1, 1], dtype=jnp.int32),
+            shape=(amount,),
+        )
+        wires = jnp.pad(
+            wires,
+            (0, total - amount),
+            mode="constant",
+            constant_values=(0,),
+        )
+        wires = random.permutation(key, wires)
+        return wires
+
+    def __post_init__(self) -> None:
+        self.units = (
+            self.inter_neurons + self.command_neurons + self.motor_neurons
+        )
+        self.output_dim = self.motor_neurons
+
+    def init_adjacency_matrix(self, key: Array) -> Array:
+        adj = jnp.zeros((self.units, self.units), dtype=jnp.int32)
+        motor_range = (0, self.motor_neurons)
+        command_range = (
+            motor_range[1],
+            motor_range[1] + self.command_neurons,
+        )
+        inter_range = (
+            command_range[1],
+            command_range[1] + self.inter_neurons,
+        )
+        mean_command_neuron_fanin = NCP._clip(
+            int(self.inter_neurons * self.inter_fanout / self.command_neurons),
+            1,
+            self.command_neurons,
+        )
+
+        def inter_command_wire_fn(key: Array) -> Array:
+            return NCP._get_wires(
+                key,
+                self.inter_fanout,
+                self.command_neurons,
             )
-        if self._inter_fanout > self._num_command_neurons:
-            raise ValueError(
-                "Error:: Inter fanout parameter is {} but there are only {} command neurons".format(
-                    self._inter_fanout, self._num_command_neurons
-                )
+
+        def inter_command_mean_wire_fn(key: Array) -> Array:
+            return NCP._get_wires(
+                key,
+                mean_command_neuron_fanin,
+                self.inter_neurons,
             )
 
-    def build(self, input_shape: int) -> None:
-        if super()._is_input_dim_initialized(input_shape):
-            return
-        self.input_dim = input_shape
-        self._num_sensory_neurons = self.input_dim
-        self._sensory_neurons = list(range(0, self._num_sensory_neurons))
-
-        self._build_sensory_to_inter_layer()
-        self._build_inter_to_command_layer()
-        self._build_recurrent_command_layer()
-        self._build_command__to_motor_layer()
-
-    def _build_sensory_to_inter_layer(self) -> None:
-        unreachable_inter_neurons = [n for n in self._inter_neurons]
-        for src in self._sensory_neurons:
-            for dest in self._rng.choice(
-                self._inter_neurons, shape=self._sensory_fanout, replace=False
-            ):
-                if dest in unreachable_inter_neurons:
-                    unreachable_inter_neurons.remove(dest)
-                polarity = self._rng.choice([-1, 1])
-                self._add_sensory_synapse(src, dest, polarity)
-
-        mean_inter_neuron_fanin = int(
-            self._num_sensory_neurons
-            * self._sensory_fanout
-            / self._num_inter_neurons
+        adj = NCP._apply_on_submatrix(
+            key,
+            adj,
+            (
+                (command_range[0], command_range[1]),
+                (inter_range[0], inter_range[1]),
+            ),
+            inter_command_wire_fn,
+            1,
         )
-        mean_inter_neuron_fanin = jnp.clip(
-            mean_inter_neuron_fanin, 1, self._num_sensory_neurons
+        adj = NCP._apply_on_submatrix(
+            key,
+            adj,
+            (
+                (command_range[0], command_range[1]),
+                (inter_range[0], inter_range[1]),
+            ),
+            inter_command_mean_wire_fn,
+            0,
+            filter_zeroed_only=True,
         )
-        for dest in unreachable_inter_neurons:
-            for src in self._rng.choice(
-                self._sensory_neurons,
-                shape=mean_inter_neuron_fanin,
-                replace=False,
-            ):
-                polarity = self._rng.choice([-1, 1])
-                self._add_sensory_synapse(src, dest, polarity)
-
-    def _build_inter_to_command_layer(self) -> None:
-        unreachable_command_neurons = [n for n in self._command_neurons]
-        for src in self._inter_neurons:
-            for dest in self._rng.choice(
-                self._command_neurons, shape=self._inter_fanout, replace=False
-            ):
-                if dest in unreachable_command_neurons:
-                    unreachable_command_neurons.remove(dest)
-                polarity = self._rng.choice([-1, 1])
-                self._add_synapse(src, dest, polarity)
-
-        mean_command_neurons_fanin = int(
-            self._num_inter_neurons
-            * self._inter_fanout
-            / self._num_command_neurons
+        recurrent_command_wires = NCP._get_wires(
+            key,
+            self.recurrent_command_synapses,
+            self.command_neurons**2,
         )
-        mean_command_neurons_fanin = jnp.clip(
-            mean_command_neurons_fanin, 1, self._num_command_neurons
+        recurrent_command_wires = jnp.reshape(
+            recurrent_command_wires,
+            (self.command_neurons, self.command_neurons),
         )
-        for dest in unreachable_command_neurons:
-            for src in self._rng.choice(
-                self._inter_neurons,
-                shape=mean_command_neurons_fanin,
-                replace=False,
-            ):
-                polarity = self._rng.choice([-1, 1])
-                self._add_synapse(src, dest, polarity)
-
-    def _build_recurrent_command_layer(self) -> None:
-        for _ in range(self._recurrent_command_synapses):
-            src = self._rng.choice(self._command_neurons)
-            dest = self._rng.choice(self._command_neurons)
-            polarity = self._rng.choice([-1, 1])
-            self._add_synapse(src, dest, polarity)
-
-    def _build_command__to_motor_layer(self) -> None:
-        unreachable_command_neurons = [n for n in self._command_neurons]
-        for dest in self._motor_neurons:
-            for src in self._rng.choice(
-                self._command_neurons, shape=self._motor_fanin, replace=False
-            ):
-                if src in unreachable_command_neurons:
-                    unreachable_command_neurons.remove(src)
-                polarity = self._rng.choice([-1, 1])
-                self._add_synapse(src, dest, polarity)
-
-        mean_command_fanout = int(
-            self._num_motor_neurons
-            * self._motor_fanin
-            / self._num_command_neurons
+        adj = adj.at[
+            command_range[0] : command_range[1],
+            command_range[0] : command_range[1],
+        ].set(recurrent_command_wires)
+        mean_command_neuron_fanout = NCP._clip(
+            int(self.motor_neurons * self.motor_fanin / self.command_neurons),
+            1,
+            self.motor_neurons,
         )
-        mean_command_fanout = jnp.clip(
-            mean_command_fanout, 1, self._num_motor_neurons
+
+        def command_motor_wire_fn(key: Array) -> Array:
+            return NCP._get_wires(
+                key,
+                self.motor_fanin,
+                self.command_neurons,
+            )
+
+        def command_motor_mean_wire_fn(key: Array) -> Array:
+            return NCP._get_wires(
+                key,
+                mean_command_neuron_fanout,
+                self.motor_neurons,
+            )
+
+        adj = NCP._apply_on_submatrix(
+            key,
+            adj,
+            (
+                (motor_range[0], motor_range[1]),
+                (command_range[0], command_range[1]),
+            ),
+            command_motor_wire_fn,
+            0,
         )
-        for src in unreachable_command_neurons:
-            for dest in self._rng.choice(
-                self._motor_neurons, shape=mean_command_fanout, replace=False
-            ):
-                polarity = self._rng.choice([-1, 1])
-                self._add_synapse(src, dest, polarity)
+        adj = NCP._apply_on_submatrix(
+            key,
+            adj,
+            (
+                (motor_range[0], motor_range[1]),
+                (command_range[0], command_range[1]),
+            ),
+            command_motor_mean_wire_fn,
+            1,
+            filter_zeroed_only=True,
+        )
+        return adj
 
-
-class AutoNCP(NCP):
-    def __init__(
+    def init_sensory_adjacency_matrix(
         self,
-        units: int,
-        output_size: int,
-        sparsity_level=0.5,
-        seed=22222,
-    ) -> None:
-        """Instantiate an NCP wiring with only needing to specify the number of units and the number of outputs
+        key: Array,
+        input_dim: int,
+    ) -> Array:
+        self.input_dim = input_dim
+        adj = jnp.zeros((self.input_dim, self.units), dtype=jnp.int32)
+        inter_range = (
+            offset := self.motor_neurons + self.command_neurons,
+            offset + self.inter_neurons,
+        )
+        mean_inter_neuron_fanin = NCP._clip(
+            int(self.input_dim * self.sensory_fanout / self.inter_neurons),
+            1,
+            self.input_dim,
+        )
 
-        :param units: The total number of neurons
-        :param output_size: The number of motor neurons (=output size). This value must be less than units-2 (typically good choices are 0.3 times the total number of units)
-        :param sparsity_level: A hyperparameter between 0.0 (very dense) and 0.9 (very sparse) NCP.
-        :param seed: Random seed for generating the wiring
+        def wire_fn(key: Array) -> Array:
+            return NCP._get_wires(
+                key,
+                self.sensory_fanout,
+                self.inter_neurons,
+            )
+
+        def mean_wire_fn(key: Array) -> Array:
+            return NCP._get_wires(
+                key,
+                mean_inter_neuron_fanin,
+                self.input_dim,
+            )
+
+        adj = NCP._apply_on_submatrix(
+            key,
+            adj,
+            ((inter_range[0], inter_range[1]), (0, self.input_dim)),
+            wire_fn,
+            1,
+        )
+        adj = NCP._apply_on_submatrix(
+            key,
+            adj,
+            ((inter_range[0], inter_range[1]), (0, self.input_dim)),
+            mean_wire_fn,
+            0,
+            filter_zeroed_only=True,
+        )
+        return adj
+
+
+def AutoNCP(units: int, output_size: int, sparsity_level=0.5) -> Wiring:
+    """Instantiate an NCP wiring with only needing to specify the number of units and the number of outputs
+
+    :param units: The total number of neurons
+    :param output_size: The number of motor neurons (=output size). This value must be less than units-2 (typically good choices are 0.3 times the total number of units)
+    :param sparsity_level: A hyperparameter between 0.0 (very dense) and 0.9 (very sparse) NCP.
+    :param seed: Random seed for generating the wiring
+    """
+    density_level = 1.0 - sparsity_level
+    inter_and_command_neurons = units - output_size
+    command_neurons = max(int(0.4 * inter_and_command_neurons), 1)
+    inter_neurons = inter_and_command_neurons - command_neurons
+
+    sensory_fanout = max(int(inter_neurons * density_level), 1)
+    inter_fanout = max(int(command_neurons * density_level), 1)
+    recurrent_command_synapses = max(
+        int(command_neurons * density_level * 2), 1
+    )
+    motor_fanin = max(int(command_neurons * density_level), 1)
+    return NCP(
+        inter_neurons,
+        command_neurons,
+        output_size,
+        sensory_fanout,
+        inter_fanout,
+        recurrent_command_synapses,
+        motor_fanin,
+    )
+
+
+class WiringFactory:
+
+    @staticmethod
+    def new(wiring_params: WiringParams) -> Optional[Wiring]:
+        """Create a new Wiring instance
+
+        :param wiring_params: The params to use to construct the Wiring object
+        :return object: A new Wiring instance
         """
-        if output_size >= units - 2:
-            raise ValueError(
-                f"Output size must be less than the number of units-2 (given {units} units, {output_size} output size)"
-            )
-        if sparsity_level < 0.1 or sparsity_level > 1.0:
-            raise ValueError(
-                f"Sparsity level must be between 0.0 and 0.9 (given {sparsity_level})"
-            )
-        density_level = 1.0 - sparsity_level
-        inter_and_command_neurons = units - output_size
-        command_neurons = max(int(0.4 * inter_and_command_neurons), 1)
-        inter_neurons = inter_and_command_neurons - command_neurons
+        if "ncp" in wiring_params:
+            ncp_params = wiring_params["ncp"]
+            if "units" in ncp_params:
+                return AutoNCP(
+                    ncp_params["units"],
+                    ncp_params["output_size"],
+                    ncp_params.get("sparsity_level", 0.5),
+                )
+            else:
+                return NCP(**ncp_params)
+        else:
+            return None
 
-        sensory_fanout = max(int(inter_neurons * density_level), 1)
-        inter_fanout = max(int(command_neurons * density_level), 1)
-        recurrent_command_synapses = max(
-            int(command_neurons * density_level * 2), 1
-        )
-        motor_fanin = max(int(command_neurons * density_level), 1)
-        super(AutoNCP, self).__init__(
-            inter_neurons,
-            command_neurons,
-            output_size,
-            sensory_fanout,
-            inter_fanout,
-            recurrent_command_synapses,
-            motor_fanin,
-            seed,
-        )
+    @staticmethod
+    def get_core_params(wiring_params: WiringParams) -> tuple[int, int]:
+        """Get core wiring params from config
+
+        :param wiring_params: The config
+        :return tuple: (units, output_dim)
+        """
+        units, output_dim = 0, 0
+        if "ncp" in wiring_params:
+            ncp_params = wiring_params["ncp"]
+            if "units" in ncp_params:
+                units = ncp_params["units"]
+            else:
+                units = (
+                    ncp_params["inter_neurons"]
+                    + ncp_params["command_neurons"]
+                    + ncp_params["motor_neurons"]
+                )
+            if "output_size" in ncp_params:
+                output_dim = ncp_params["output_size"]
+            else:
+                output_dim = ncp_params["motor_neurons"]
+        return units, output_dim
