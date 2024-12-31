@@ -4,7 +4,7 @@
 import flax
 from flax import linen as nn
 from flax.training import train_state
-from flaxoil import ltc, wirings
+from flaxoil import ltc
 import jax
 from jax import numpy as jnp
 import optax
@@ -19,11 +19,11 @@ def get_dataset() -> tuple[jax.Array, jax.Array, jax.Array]:
 
 def create_train_state_and_constants(
     rnn: nn.RNN,
-    rng: jax.Array,
+    rngs: dict[str, jax.Array],
     x: jax.Array,
     learning_rate: float,
 ) -> tuple[train_state.TrainState, flax.core.FrozenDict]:
-    variables = rnn.init(rng, x)
+    variables = rnn.init(rngs, x)
     params = variables["params"]
     wirings_constants = variables["wirings_constants"]
     tx = optax.adam(learning_rate)
@@ -40,6 +40,7 @@ def create_train_state_and_constants(
 @jax.jit
 def train(
     state: train_state.TrainState,
+    rngs: dict[str, jax.Array],
     x: jax.Array,
     y: jax.Array,
     wirings_constants: flax.core.FrozenDict,
@@ -48,6 +49,7 @@ def train(
         y_predicted = state.apply_fn(
             {"params": params, "wirings_constants": wirings_constants},
             x,
+            rngs=rngs,
         )
         loss = optax.squared_error(y_predicted, y).mean()
         return loss
@@ -61,20 +63,22 @@ def train(
 def main() -> None:
     _, x, y = get_dataset()
 
+    rngs = {"params": jax.random.key(0)}
+
     rnn = nn.RNN(
-        ltc.LTCCell(wirings.AutoNCP(6, 1)),
+        ltc.LTCCell({"ncp": {"units": 6, "output_size": 1}}),
         variable_broadcast=["params", "wirings_constants"],
     )
 
     state, wirings_constants = create_train_state_and_constants(
         rnn,
-        jax.random.key(0),
+        rngs,
         x,
         0.01,
     )
 
     for i in range(1, 1001):
-        state, loss = train(state, x, y, wirings_constants)
+        state, loss = train(state, rngs, x, y, wirings_constants)
         if not i % 10:
             print(f"i: {i}, loss: {loss}")
 
