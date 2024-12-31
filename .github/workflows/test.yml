@@ -14,8 +14,7 @@ jobs:
       with:
         python-version: '3.12'
     - name: Install
-      run: pip install --user -U -r requirements.lock.txt
-      run: pip install --user -U .
+      run: pip install --user -U -r requirements.lock.txt && pip install --user -U .
     - name: Run unit tests
       run: python -m unittest discover -s src/
     - name: Run integration tests
